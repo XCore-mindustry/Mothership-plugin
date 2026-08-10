@@ -1,0 +1,609 @@
+package mothership.plugin;
+
+import arc.Events;
+import arc.graphics.Color;
+import arc.math.Mathf;
+import arc.math.geom.Vec2;
+import arc.struct.ObjectMap;
+import arc.struct.ObjectSet;
+import arc.struct.Seq;
+import arc.util.CommandHandler;
+import arc.util.Log;
+import arc.util.Time;
+import mindustry.Vars;
+import mindustry.content.Fx;
+import mindustry.content.Items;
+import mindustry.game.EventType;
+import mindustry.game.EventType.Trigger;
+import mindustry.game.Team;
+import mindustry.game.Teams;
+import mindustry.gen.*;
+import mindustry.content.UnitTypes;
+import mindustry.mod.Plugin;
+import mindustry.type.Item;
+import mindustry.type.UnitType;
+
+public class Library extends Plugin {
+
+    //mothership
+    public static class Mothership {
+        public static UnitType unitType = UnitTypes.oct;
+        public static UnitType abilityUnitType = UnitTypes.crawler;
+        public static int maxUnits = 24;
+        public static final Vec2[] spawnPoints = {
+                new Vec2(0f, 20f),
+                new Vec2(18.4f, 12.4f),
+                new Vec2(26.0f, -6f),
+                new Vec2(18.4f, -25.4f),
+                new Vec2(0f, -32f),
+                new Vec2(-18.4f, -25.4f),
+                new Vec2(-26.0f, -6f),
+                new Vec2(-18.4f, 12.4f)
+        };
+    }
+
+    //ranks
+    public static class RankSystem {
+        public static class Rank {
+            public final String name;
+            public final String emoji;
+            public final int winsRequired;
+
+            public Rank(String name, String emoji, int winsRequired) {
+                this.name = name;
+                this.emoji = emoji;
+                this.winsRequired = winsRequired;
+            }
+        }
+
+        public static final Rank[] RANKS = {
+                new Rank("[gray]null[]", "\uF833", 0),
+                new Rank("[#495057]Basi[#CED4DA]c[]", "\uF7EB", 5),
+                new Rank("[#495057]Poun[#CED4DA]de[#F8F9FA]r[]", "\uF7FA", 10),
+                new Rank("[#CED4DA]Di[#F8F9FA]re[#FFFFFF]ctor[]", "\uF800", 15),
+                new Rank("[#F8F9FA]Ov[#22A6B3]er[#0E8C9D]seer[]", "\uF7FD", 20),
+                new Rank("[#22A6B3]Ov[#0E8C9D]er[#0652DD]lord[]", "\uF7FC", 25),
+                new Rank("[#0E8C9D]Ne[#0652DD]cr[#6C5CE7]omancer[]", "\uF7FF", 30),
+                new Rank("[#0652DD]Cr[#6C5CE7]ui[#A29BFE]ser[]", "\uF7F9", 35),
+                new Rank("[#6C5CE7]Ba[#A29BFE]tt[#FD79A8]leship[]", "\uF7FE", 40),
+                new Rank("[#A29BFE]Dr[#FD79A8]ea[#E17055]dnought[]", "\uF7FB", 45),
+                new Rank("[#FD79A8]El[#E17055]it[#FDCB6E]e Destroyer[]", "\uF7F8", 50),
+                new Rank("[#E17055]Ne[#FDCB6E]st[#FFEAA7] Warden[]", "\uF7F4", 75),
+                new Rank("[#FDCB6E]Ro[#FFEAA7]gu[#FF7675]e Armada[]", "\uF7C3", 100),
+                new Rank("[#FFEAA7]Ex[#FF7675]or[#D63031]cistor[]", "\uF7C4", 125),
+                new Rank("[#FF7675]Za[#D63031]ph[#E17055]kiel[]", "\uF782", 150),
+                new Rank("[#D63031]Th[#E17055]au[#FFEAA7]maturge[]", "\uF780", 175),
+                new Rank("[#E17055]Kr[#FDCB6E]on[#FFEAA7]os[]", "\uF7C6", 200)
+        };
+
+        public static Rank getRank(int wins) {
+            Rank result = RANKS[0];
+            for (Rank rank : RANKS) {
+                if (wins >= rank.winsRequired) {
+                    result = rank;
+                }
+            }
+            return result;
+        }
+    }
+
+    //ranks data
+    private final ObjectMap<String, Integer> playerWins = new ObjectMap<>();
+    private final String dataFile = "config/ranks.properties";
+
+    //player's names
+    private final ObjectMap<String, String> originalNames = new ObjectMap<>();
+
+    //list of all coin blocks for set
+    public String[] coinBlocks = {
+            "pulverizer", "graphite-press", "kiln", "pyratite-mixer",
+            "silicon-smelter", "spore-press", "multi-press", "blast-mixer",
+            "plastanium-compressor", "phase-weaver", "surge-smelter",
+            "silicon-crucible", "coal-centrifuge"
+    };
+
+    //team timers
+    private final ObjectMap<Team, Float> teamTimers = new ObjectMap<>();
+
+    //timer for teleport items
+    private float itemTimer = 0f;
+
+    //timer generation coins
+    private float incomeTimer = 0f;
+
+    //mothership's drones cache
+    private final ObjectMap<Team, Unit> mothershipCache = new ObjectMap<>();
+    private float cacheTimer = 0f;
+
+    //active teams
+    private final Seq<Teams.TeamData> activeTeamsCache = new Seq<>();
+
+    //coin blocks set
+    private final ObjectSet<String> coinBlockSet = new ObjectSet<>();
+
+    //temp vectors
+    private final Vec2 tmpVec1 = new Vec2();
+    private final Vec2 tmpVec2 = new Vec2();
+    private final Vec2 tmpVec3 = new Vec2();
+
+    //flag on game end
+    private boolean isGameEnded = false;
+
+    //item used for "coin"
+    public Item coinItem;
+
+    @Override
+    public void init() {
+        loadData();
+
+        //setting coin item
+        coinItem = Items.dormantCyst;
+
+        //setting coin blocks
+        for (String name : coinBlocks) { coinBlockSet.add(name); }
+
+        Events.run(Trigger.update, () -> {
+
+            if (Vars.state != null && Vars.state.isPlaying() && Vars.state.teams != null && Vars.state.teams.getActive().size > 1) { isGameEnded = false; }
+
+            //core repair
+            if (Vars.state != null && Vars.state.isPlaying() && Vars.state.teams != null) {
+                activeTeamsCache.clear();
+                activeTeamsCache.addAll(Vars.state.teams.getActive());
+                for (Teams.TeamData teamData : activeTeamsCache) {
+                    if (teamData != null && teamData.core() != null && teamData.core().isValid()) {
+                        var coreBuild = teamData.core();
+                        coreBuild.health = coreBuild.maxHealth;
+                    }
+                }
+            }
+
+            //coin generation
+            incomeTimer += Time.delta;
+            if (incomeTimer >= 60f) {
+                if (Vars.state != null && Vars.state.isPlaying() && coinItem != null && Vars.state.teams != null) {
+                    activeTeamsCache.clear();
+                    activeTeamsCache.addAll(Vars.state.teams.getActive());
+                    for (Teams.TeamData teamData : activeTeamsCache) {
+                        if (teamData != null && teamData.core() != null) {
+                            teamData.core().items.add(coinItem, 1);
+                        }
+                    }
+                }
+                incomeTimer = 0f;
+            }
+
+            //cache update
+            cacheTimer += Time.delta;
+            if (cacheTimer >= 180f) {
+                cacheTimer = 0f;
+                mothershipCache.clear();
+                Groups.unit.each(u -> {
+                    if (u.type == Mothership.unitType && u.isValid()) {
+                        mothershipCache.put(u.team(), u);
+                    }
+                });
+            }
+
+            //mothership unit spawn ability
+            mothershipCache.each((team, mothership) -> {
+                if (mothership == null || !mothership.isValid()) return;
+
+                if (!teamTimers.containsKey(team)) {
+                    teamTimers.put(team, 0f);
+                }
+
+                float currentTimer = teamTimers.get(team) + Time.delta;
+                teamTimers.put(team, currentTimer);
+
+                if (currentTimer >= 15f) {
+                    int aliveUnits = Groups.unit.count(u ->
+                            u.type == Mothership.abilityUnitType && u.team() == team
+                    );
+
+                    if (aliveUnits < Mothership.maxUnits) {
+                        Vec2 offset = Mothership.spawnPoints[Mathf.random(Mothership.spawnPoints.length - 1)];
+                        Unit u = Mothership.abilityUnitType.create(team);
+                        u.set(mothership.x + offset.x, mothership.y + offset.y);
+                        u.add();
+                    }
+                    teamTimers.put(team, 0f);
+                }
+            });
+
+            //abilityUnit ai
+            Groups.unit.each(unit -> {
+                if (unit == null || !unit.isValid() || unit.type != Mothership.abilityUnitType) return;
+
+                Team team = unit.team();
+
+                Unit friendMothership = mothershipCache.get(team);
+
+                if (friendMothership == null) {
+                    unit.vel.set(Vec2.ZERO);
+                    return;
+                }
+
+                Player player = friendMothership.getPlayer();
+                tmpVec1.set(friendMothership.x, friendMothership.y);
+                Vec2 targetPos = tmpVec1;
+                boolean isShooting = player != null && player.shooting();
+
+                if (isShooting) {
+                    if (player != null) {
+                        tmpVec2.set(player.mouseX, player.mouseY);
+                        targetPos = tmpVec2;
+
+                        if (tmpVec1.dst(targetPos) > Mothership.unitType.range) {
+                            tmpVec3.set(targetPos.x - tmpVec1.x, targetPos.y - tmpVec1.y).setLength(Mothership.unitType.range).add(tmpVec1);
+                            targetPos = tmpVec3;
+                        }
+                    }
+                } else {
+                    Unit enemy = mindustry.entities.Units.closestEnemy(team, unit.x, unit.y, Mothership.unitType.range, mindustry.gen.Healthc::isValid);
+                    if (enemy != null) {
+                        tmpVec2.set(enemy.x, enemy.y);
+                        targetPos = tmpVec2;
+
+                        if (tmpVec1.dst(targetPos) > Mothership.unitType.range) {
+                            targetPos = tmpVec1;
+                        }
+                    }
+                }
+
+                float dst = unit.dst(targetPos.x, targetPos.y);
+                float targetRadius = (targetPos == tmpVec1) ? 44f : 0f;
+
+                if (dst > targetRadius + 8f) {
+                    tmpVec3.set(targetPos.x - unit.x, targetPos.y - unit.y).setLength(unit.speed());
+                    unit.vel.set(tmpVec3);
+                    unit.lookAt(targetPos);
+                } else if (dst < targetRadius - 8f && targetRadius > 0f) {
+                    tmpVec3.set(unit.x - targetPos.x, unit.y - targetPos.y).setLength(unit.speed());
+                    unit.vel.set(tmpVec3);
+                    unit.lookAt(targetPos);
+                } else {
+                    unit.vel.set(Vec2.ZERO);
+                    unit.lookAt(targetPos);
+                }
+            });
+
+            //taking coins from factories
+            itemTimer += Time.delta;
+            if (itemTimer >= 10f) {
+                Groups.build.each(building -> {
+
+                    if (coinBlockSet.contains(building.block.name)) {
+                        try {
+                            int coins = building.items.get(coinItem);
+                            if (coins > 0 && building.team.core() != null) {
+                                building.team.core().items.add(coinItem, coins);
+                                Call.setItem(building, coinItem, 0);
+                            }
+                        } catch (Throwable t) { /* saving server */ }
+                    }
+
+                    //filling turrets
+                    if (building instanceof mindustry.world.blocks.defense.turrets.ItemTurret.ItemTurretBuild) {
+                        try {
+                            mindustry.world.blocks.defense.turrets.ItemTurret.ItemTurretBuild turret = (mindustry.world.blocks.defense.turrets.ItemTurret.ItemTurretBuild) building;
+                            mindustry.world.blocks.defense.turrets.ItemTurret turretBlock = (mindustry.world.blocks.defense.turrets.ItemTurret) turret.block;
+
+                            if (building.team.core() != null) {
+                                var teamCore = building.team.core();
+
+                                var ammoKeys = turretBlock.ammoTypes.keys().toSeq();
+                                ammoKeys.sort((a, b) -> Integer.compare(a.id, b.id));
+                                int ammoCount = ammoKeys.size;
+
+                                if (ammoCount > 0) {
+                                    int coreCoins = teamCore.items.get(coinItem);
+                                    int maxEco = 50000;
+
+                                    int ammoIndex = (coreCoins * ammoCount) / maxEco;
+
+                                    if (ammoIndex >= ammoCount) ammoIndex = ammoCount - 1;
+                                    if (ammoIndex < 0) ammoIndex = 0;
+
+                                    mindustry.type.Item selectedAmmo = ammoKeys.get(ammoIndex);
+
+                                    turret.ammo.clear();
+
+                                    var ammoDef = turretBlock.ammoTypes.get(selectedAmmo);
+                                    if (ammoDef != null) {
+                                        turret.ammo.clear();
+
+                                        for (int i = 0; i < turretBlock.maxAmmo; i++) {
+                                            turret.handleItem(turret, selectedAmmo);
+                                        }
+
+                                        turret.totalAmmo = turretBlock.maxAmmo;
+                                        mindustry.gen.Call.setItem(turret, selectedAmmo, turretBlock.maxAmmo);
+                                    }
+                                }
+                            }
+                        } catch (Throwable t) { /* safe server */ }
+                    }
+                });
+
+                //converting items->coins
+                if (Vars.state != null && Vars.state.isPlaying() && Vars.state.teams != null) {
+                    activeTeamsCache.clear();
+                    activeTeamsCache.addAll(Vars.state.teams.getActive());
+                    for (Teams.TeamData teamData : activeTeamsCache) {
+                        if (teamData == null || teamData.core() == null || teamData.buildings == null) continue;
+                        var teamCore = teamData.core();
+
+                        teamData.buildings.each(building -> {
+                            if (building == null || !building.isValid() || building.items == null) return;
+
+                            if (building.block.name.equals("container")) {
+                                try {
+
+                                    if (building.items.get(Items.scrap) > 0) Call.setItem(building, Items.scrap, 0);
+
+                                    boolean transformed = false;
+
+                                    int scrap = building.items.get(Items.scrap);
+                                    if (scrap > 0) {
+                                        teamCore.items.add(coinItem, scrap);
+                                        Call.setItem(building, Items.scrap, 0);
+                                        transformed = true;
+                                    }
+
+                                    int copper = building.items.get(Items.copper);
+                                    if (copper > 0) {
+                                        teamCore.items.add(coinItem, copper);
+                                        Call.setItem(building, Items.copper, 0);
+                                        transformed = true;
+                                    }
+
+                                    int lead = building.items.get(Items.lead);
+                                    if (lead > 0) {
+                                        teamCore.items.add(coinItem, lead);
+                                        Call.setItem(building, Items.lead, 0);
+                                        transformed = true;
+                                    }
+
+                                    int coal = building.items.get(Items.coal);
+                                    if (coal > 0) {
+                                        teamCore.items.add(coinItem, coal);
+                                        Call.setItem(building, Items.coal, 0);
+                                        transformed = true;
+                                    }
+
+                                    int titanium = building.items.get(Items.titanium);
+                                    if (titanium > 0) {
+                                        teamCore.items.add(coinItem, titanium);
+                                        Call.setItem(building, Items.titanium, 0);
+                                        transformed = true;
+                                    }
+
+                                    int thorium = building.items.get(Items.thorium);
+                                    if (thorium > 0) {
+                                        teamCore.items.add(coinItem, thorium);
+                                        Call.setItem(building, Items.thorium, 0);
+                                        transformed = true;
+                                    }
+
+                                    if (transformed) {
+                                        Call.effect(Fx.pulverize, building.x, building.y, 0, Color.white);
+                                    }
+                                } catch (Throwable t) { /* safe server */ }
+                            }
+                        });
+                    }
+                }
+                itemTimer = 0f;
+            }
+
+            //gameover (with winning team)
+            Events.on(mindustry.game.EventType.UnitDestroyEvent.class, e -> {
+                if (Vars.state == null || !Vars.state.isPlaying() || e.unit == null) return;
+
+                if (isGameEnded) return;
+
+                if (e.unit.type == Mothership.unitType) {
+                    try {
+                        final arc.struct.ObjectSet<Team> aliveMothershipTeams = new arc.struct.ObjectSet<>();
+
+                        mothershipCache.each((team, u) -> {
+                            if (u != null && u.isValid()) {
+                                aliveMothershipTeams.add(team);
+                            }
+                        });
+
+                        if (aliveMothershipTeams.size == 1 && Vars.state.isGame()) {
+                            Team winnerTeam = aliveMothershipTeams.first();
+                            Log.info("Game over: Winner: " + winnerTeam.name);
+
+                            isGameEnded = true;
+
+                            //editing ranks
+                            Groups.player.each(p -> {
+                                if (p != null && p.team() == winnerTeam) {
+                                    String uuid = p.uuid();
+                                    int currentWins = playerWins.get(uuid, 0);
+                                    playerWins.put(uuid, currentWins + 1);
+
+                                    RankSystem.Rank newRank = RankSystem.getRank(currentWins + 1);
+                                    p.sendMessage("[green]Victory! Total wins: " + (currentWins + 1) + " | Rank: " + newRank.emoji + " " + newRank.name);
+                                }
+                            });
+                            saveData();
+
+                            mindustry.game.EventType.GameOverEvent gameOver = new mindustry.game.EventType.GameOverEvent(winnerTeam);
+                            Events.fire(gameOver);
+                        }
+
+                    } catch (Throwable t) { /* safe game over */ }
+                }
+            });
+        });
+
+        //on join, hellowindow
+        Events.on(mindustry.game.EventType.PlayerJoin.class, e -> {
+            if (Vars.state == null || !Vars.state.isPlaying() || e.player == null) return;
+            try {
+                String welcomeMessage =
+                        "[cyan]MOTHERSHIP MODE[]\n\n" +
+                                "[lightgray]This is a unique game mode where:[][white]\n\n" +
+                                "* Control [orange]Mothership[]: defend your base,\n" +
+                                "* attack enemies, or assist your team![]\n\n" +
+                                "* Upgrade [green]Economy[]: build factories and collect\n" +
+                                "* Coins to unlock powerful ammo tiers.[]\n\n" +
+                                "* Protect the [red]Flagship[]: if your Mothership dies,\n" +
+                                "* your team instantly loses the match![]\n\n" +
+                                "[yellow]Type [cyan]/info[] in chat to see detailed description.[]\n\n" +
+                                "[accent]Have fun and good luck in battle![]";
+
+                Call.infoMessage(e.player.con, welcomeMessage);
+
+            } catch (Throwable t) { /* safe welcome */ }
+        });
+
+        //rank show
+        Vars.netServer.chatFormatter = (player, message) -> {
+            if (player == null) return message;
+
+            String uuid = player.uuid();
+            int wins = playerWins.get(uuid, 0);
+            RankSystem.Rank rank = RankSystem.getRank(wins);
+
+            return "[coral][ [white]<" + rank.emoji + " " + rank.name + "[white]> " + player.coloredName() + "[coral]]:[white] " + message;
+        };
+    }
+
+    //info command
+    @Override
+    public void registerClientCommands(CommandHandler handler) {
+        handler.<Player>register("info", "Show detailed information about the mode mechanics", (args, player) -> {
+            String infoText =
+                    "\n[cyan]==== DETAILED MOTHERSHIP MODE MECHANICS ====\n\n" +
+                            "[orange]1. RESOURCE TRANSFORMATION:[]\n" +
+                            "* All ore from [yellow]Containers[] is automatically burned.\n" +
+                            "* Copper/Lead/Coal give [green]1 Coin[], Titanium - [green]2[], Thorium - [green]3[].\n" +
+                            "* [lightgray]Sand and Scrap are destroyed with 0 Coin payout.[]\n" +
+                            "* All earned Coins are instantly [cyan]teleported into the Core[]!\n\n" +
+                            "[orange]2. ADVANCED ECONOMY:[]\n" +
+                            "* Factories (silicon, graphite, etc.) gather Coins passively.\n" +
+                            "* Factory production is [green]~50% more efficient[] than regular ore burning.\n" +
+                            "* Every second, the Core passively generates [green]+1 Coin[].\n\n" +
+                            "[orange]3. TURRET UPGRADES (50k Coins Limit):[]\n" +
+                            "* Turret ammo is infinite and supplied wirelessly.\n" +
+                            "* Ammo type dynamically changes based on your Core Coin balance.\n" +
+                            "* [lightgray]The upgrade scale is divided into equal 25% steps per ammo type.[]\n\n" +
+                            "[orange]4. SPAWN & MATCH RULES:[]\n" +
+                            "* Main [cyan]Cores are indestructible[] (HP is locked at 100%).\n" +
+                            "* Losing your Mothership means instant [red]DEFEAT[] for the entire team.\n" +
+                            "[cyan]============================================[]";
+            player.sendMessage(infoText);
+        });
+
+        handler.<Player>register("rank", "Show your rank info.", (args, player) -> {
+            if (player == null) return;
+            int wins = playerWins.get(player.uuid(), 0);
+            RankSystem.Rank rank = RankSystem.getRank(wins);
+
+            int g = 0;
+            String h = "MAX";
+            String k = "";
+            String b = "";
+            for (RankSystem.Rank r : RankSystem.RANKS) {
+                if (wins < r.winsRequired) {
+                    g = r.winsRequired;
+                    h = r.name;
+                    k = r.emoji;
+                    break;
+                }
+            }
+
+            player.sendMessage("Your Stats: " + "Wins [ [yellow]" + wins + "[] ]" + " Rank [ " + rank.emoji + " [white]" + rank.name + " ]\n");
+
+            if (g > 0) {
+                int j = g - wins;
+                b += "Wins to next rank ( " + k + " " + h + " ): " + j + ".";
+            } else {
+                b += "[gold]You reached the highest rank.";
+            }
+
+            player.sendMessage(b);
+        });
+
+        handler.<Player>register("ranks", "Shows all ranks.", (args, player) -> {
+
+            player.sendMessage("[cyan]=== ALL RANKS ===\n[lightgray]Wins required to unlock each rank:");
+
+            for (RankSystem.Rank r : RankSystem.RANKS) {
+                String nameDisplay = r.name;
+                player.sendMessage("  " + r.emoji + " " + r.name + " [lightgray]-> [yellow]" + r.winsRequired + " wins");
+            }
+
+            player.sendMessage("[lightgray]Use [white]/rank [lightgray]to see your progress.");
+        });
+
+        handler.<Player>register("top", "Show top 10 players by wins", (args, player) -> {
+            if (player == null) return;
+
+            Seq<ObjectMap.Entry<String, Integer>> sorted = new Seq<>();
+            for (var entry : playerWins.entries()) {
+                sorted.add(entry);
+            }
+            sorted.sort((a, b) -> Integer.compare(b.value, a.value));
+
+            StringBuilder sb = new StringBuilder("[cyan]=== TOP PLAYERS ===\n");
+            int limit = Math.min(5, sorted.size);
+            for (int i = 0; i < limit; i++) {
+                var entry = sorted.get(i);
+                String uuid = entry.key;
+                int wins = entry.value;
+
+                Player foundPlayer = Groups.player.find(p -> p.uuid().equals(uuid));
+
+                String name;
+                if (foundPlayer != null) {
+                    name = foundPlayer.name();
+                } else {
+                    name = "[gray](Offline)[]";
+                }
+                // ===========================
+
+                RankSystem.Rank rank = RankSystem.getRank(wins);
+                sb.append("[white]").append(i + 1).append(". ").append(name).append("[] -> ").append(rank.emoji).append(" ").append(rank.name).append(" [#FFD700]").append(wins).append(" wins\n");
+            }
+            player.sendMessage(sb.toString());
+        });
+    }
+
+    //ranks load
+    private void loadData() {
+        java.util.Properties props = new java.util.Properties();
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(dataFile)) {
+            props.load(fis);
+            playerWins.clear();
+            for (String key : props.stringPropertyNames()) {
+                try {
+                    playerWins.put(key, Integer.parseInt(props.getProperty(key)));
+                } catch (NumberFormatException ignored) {}
+            }
+            Log.info("Ranks loaded.");
+        } catch (java.io.FileNotFoundException e) {
+            Log.info("Ranks.properties not found.");
+        } catch (Exception e) {
+            Log.err("Error loading ranks.properties", e);
+        }
+    }
+
+    //ranks save
+    private void saveData() {
+        java.util.Properties props = new java.util.Properties();
+        for (ObjectMap.Entry<String, Integer> entry : playerWins) {
+            props.setProperty(entry.key, String.valueOf(entry.value));
+        }
+        try (java.io.FileOutputStream fos = new java.io.FileOutputStream(dataFile)) {
+            props.store(fos, null);
+        } catch (Exception e) {
+            Log.err("Error saving ranks.properties", e);
+        }
+    }
+}

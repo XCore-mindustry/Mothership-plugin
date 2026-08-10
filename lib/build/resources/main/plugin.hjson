@@ -1,0 +1,6 @@
+name: Mothership-plugin
+author: DronazU
+main: mothership.plugin.Library
+description: Mothership gamemode v8
+version: 1.0
+minGameVersion: 159
